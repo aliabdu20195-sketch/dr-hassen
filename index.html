@@ -1,0 +1,235 @@
+/**
+ * خلفية موقع عيادة الدكتور حسن الثلايا: الحجوزات + السلايدر + المستجدات
+ *
+ * مهم عند التحديث من نسخة سابقة:
+ * 1) الصق هذا الملف كاملًا مكان القديم ثم احفظ.
+ * 2) لا تشغّل setupAdminKey (كلمة السر المحفوظة سابقًا تبقى كما هي).
+ * 3) شغّل الدالة authorizeDrive مرة واحدة ووافق على الصلاحيات (لحفظ الصور في Drive).
+ * 4) Deploy > Manage deployments > أيقونة القلم > Version: New version > Deploy
+ *    (الرابط /exec يبقى نفسه، لا تغيّره في الموقع).
+ *
+ * أول إعداد (لمن يبدأ من الصفر): غيّر ADMIN_KEY_TO_SET ثم شغّل setupAdminKey مرة واحدة وامسح الكلمة.
+ */
+
+const ADMIN_KEY_TO_SET = 'غيّرني-إلى-كلمة-سر-قوية';
+const SHEET_NAME = 'Bookings';
+const HEADERS = ['id', 'created', 'name', 'phone', 'service', 'doctor', 'date', 'time', 'note', 'status'];
+const CONTENT_SHEET = 'Content';
+const CONTENT_HEADERS = ['id', 'type', 'title', 'text', 'image', 'service', 'active', 'created'];
+const IMAGE_FOLDER = 'ClinicSiteImages';
+
+function setupAdminKey() {
+  if (ADMIN_KEY_TO_SET === 'غيّرني-إلى-كلمة-سر-قوية') throw new Error('غيّر ADMIN_KEY_TO_SET إلى كلمة سر خاصة بك أولًا');
+  PropertiesService.getScriptProperties().setProperty('ADMIN_KEY', ADMIN_KEY_TO_SET);
+  getSheet_();
+  getContentSheet_();
+}
+
+// شغّلها مرة واحدة لمنح صلاحية Drive وإنشاء ورقة المحتوى
+function authorizeDrive() {
+  getImageFolder_();
+  getContentSheet_();
+}
+
+function getSheet_() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let sh = ss.getSheetByName(SHEET_NAME);
+  if (!sh) {
+    sh = ss.insertSheet(SHEET_NAME);
+    sh.appendRow(HEADERS);
+    sh.setFrozenRows(1);
+    sh.getRange('A:A').setNumberFormat('@');
+    sh.getRange('D:D').setNumberFormat('@');
+    sh.getRange('G:H').setNumberFormat('@');
+  }
+  return sh;
+}
+
+function getContentSheet_() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let sh = ss.getSheetByName(CONTENT_SHEET);
+  if (!sh) {
+    sh = ss.insertSheet(CONTENT_SHEET);
+    sh.appendRow(CONTENT_HEADERS);
+    sh.setFrozenRows(1);
+    sh.getRange('A:A').setNumberFormat('@');
+  }
+  return sh;
+}
+
+function getImageFolder_() {
+  const it = DriveApp.getFoldersByName(IMAGE_FOLDER);
+  return it.hasNext() ? it.next() : DriveApp.createFolder(IMAGE_FOLDER);
+}
+
+function out_(o) {
+  return ContentService.createTextOutput(JSON.stringify(o)).setMimeType(ContentService.MimeType.JSON);
+}
+
+function isAdmin_(key) {
+  const real = PropertiesService.getScriptProperties().getProperty('ADMIN_KEY');
+  return !!real && String(key) === real;
+}
+
+function str_(v) {
+  if (v instanceof Date) return Utilities.formatDate(v, Session.getScriptTimeZone(), 'yyyy-MM-dd');
+  return String(v == null ? '' : v);
+}
+
+function readAll_() {
+  const v = getSheet_().getDataRange().getValues();
+  v.shift();
+  return v.filter(r => r[0] !== '').map(r => ({
+    id: str_(r[0]), created: str_(r[1]), name: str_(r[2]), phone: str_(r[3]),
+    service: str_(r[4]), doctor: str_(r[5]), date: str_(r[6]), time: str_(r[7]),
+    note: str_(r[8]), status: str_(r[9])
+  }));
+}
+
+function readContent_() {
+  const v = getContentSheet_().getDataRange().getValues();
+  v.shift();
+  return v.filter(r => r[0] !== '').map(r => ({
+    id: str_(r[0]), type: str_(r[1]), title: str_(r[2]), text: str_(r[3]),
+    image: str_(r[4]), service: str_(r[5]), active: str_(r[6]) !== 'no', created: str_(r[7])
+  }));
+}
+
+function doGet(e) {
+  const p = (e && e.parameter) || {};
+  if (p.action === 'slots') {
+    const taken = readAll_()
+      .filter(b => b.date === p.date && b.status !== 'cancelled' && (!p.doctor || b.doctor === p.doctor))
+      .map(b => b.time);
+    return out_({ result: 'ok', taken: taken });
+  }
+  if (p.action === 'list') {
+    if (!isAdmin_(p.key)) return out_({ result: 'unauthorized' });
+    return out_({ result: 'ok', bookings: readAll_() });
+  }
+  if (p.action === 'content') {
+    // عام: المحتوى الظاهر فقط
+    const all = readContent_().filter(c => c.active);
+    return out_({
+      result: 'ok',
+      slides: all.filter(c => c.type === 'slide').map(c => ({ id: c.id, title: c.title, text: c.text, image: c.image, service: c.service })),
+      news: all.filter(c => c.type === 'news').reverse().map(c => ({ id: c.id, text: c.title, date: c.created })),
+      doctors: all.filter(c => c.type === 'doctor').map(c => ({ id: c.id, name: c.title, spec: c.text, image: c.image }))
+    });
+  }
+  if (p.action === 'content_admin') {
+    if (!isAdmin_(p.key)) return out_({ result: 'unauthorized' });
+    return out_({ result: 'ok', items: readContent_() });
+  }
+  return out_({ result: 'ok', service: 'clinic-booking' });
+}
+
+function doPost(e) {
+  let d;
+  try { d = JSON.parse(e.postData.contents); } catch (err) { return out_({ result: 'error' }); }
+
+  if (d.action === 'book') return book_(d);
+
+  if (!isAdmin_(d.key)) return out_({ result: 'unauthorized' });
+
+  if (String(d.action).indexOf('content_') === 0) return content_(d);
+
+  const sh = getSheet_();
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    const ids = sh.getRange(1, 1, sh.getLastRow(), 1).getValues().map(r => String(r[0]));
+    const row = ids.indexOf(String(d.id)) + 1;
+    if (row < 2) return out_({ result: 'notfound' });
+    if (d.action === 'confirm') sh.getRange(row, 10).setValue('confirmed');
+    else if (d.action === 'cancel') sh.getRange(row, 10).setValue('cancelled');
+    else if (d.action === 'delete') sh.deleteRow(row);
+    else return out_({ result: 'error' });
+    return out_({ result: 'ok' });
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function book_(d) {
+  const name = String(d.name || '').trim().slice(0, 80);
+  const phone = String(d.phone || '').replace(/\D/g, '');
+  const date = String(d.date || '');
+  const time = String(d.time || '');
+  if (name.length < 3 || !/^7\d{8}$/.test(phone) || !/^\d{4}-\d{2}-\d{2}$/.test(date) || !time) {
+    return out_({ result: 'invalid' });
+  }
+  const lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    const doctor = String(d.doctor || '').slice(0, 60);
+    const clash = readAll_().some(b => b.date === date && b.time === time && b.doctor === doctor && b.status !== 'cancelled');
+    if (clash) return out_({ result: 'duplicate' });
+    const id = String(Date.now());
+    getSheet_().appendRow([
+      id, new Date().toISOString(), name, phone,
+      String(d.service || '').slice(0, 60), doctor,
+      date, time, String(d.note || '').slice(0, 500), 'pending'
+    ]);
+    return out_({ result: 'ok', id: id });
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// ===== السلايدر والمستجدات والأطباء (للمدير فقط) =====
+function content_(d) {
+  const sh = getContentSheet_();
+  const lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
+    if (d.action === 'content_add') {
+      const type = d.type === 'news' ? 'news' : d.type === 'doctor' ? 'doctor' : 'slide';
+      const title = String(d.title || '').trim().slice(0, type === 'news' ? 200 : 80);
+      const text = String(d.text || '').trim().slice(0, 300);
+      if (title.length < 2) return out_({ result: 'invalid' });
+      let image = '';
+      if (type !== 'news' && d.image) {
+        try { image = saveImage_(String(d.image), String(d.mime || 'image/jpeg')); }
+        catch (err) { return out_({ result: 'imgerror', msg: String(err.message || err) }); }
+      }
+      const service = d.service === '' || d.service == null ? '' : String(parseInt(d.service, 10) || 0);
+      const id = String(Date.now());
+      sh.appendRow([id, type, title, text, image, service, 'yes', new Date().toISOString()]);
+      return out_({ result: 'ok', id: id });
+    }
+    const ids = sh.getRange(1, 1, sh.getLastRow(), 1).getValues().map(r => String(r[0]));
+    const row = ids.indexOf(String(d.id)) + 1;
+    if (row < 2) return out_({ result: 'notfound' });
+    if (d.action === 'content_toggle') {
+      const cur = String(sh.getRange(row, 7).getValue());
+      sh.getRange(row, 7).setValue(cur === 'no' ? 'yes' : 'no');
+      return out_({ result: 'ok' });
+    }
+    if (d.action === 'content_delete') {
+      trashImage_(String(sh.getRange(row, 5).getValue()));
+      sh.deleteRow(row);
+      return out_({ result: 'ok' });
+    }
+    return out_({ result: 'error' });
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function saveImage_(b64, mime) {
+  if (!/^image\/(jpeg|png|webp)$/.test(mime)) throw new Error('نوع الصورة غير مدعوم');
+  if (b64.length > 3000000) throw new Error('الصورة كبيرة جدًا');
+  const bytes = Utilities.base64Decode(b64);
+  const ext = mime === 'image/png' ? 'png' : mime === 'image/webp' ? 'webp' : 'jpg';
+  const blob = Utilities.newBlob(bytes, mime, 'clinic-' + Date.now() + '.' + ext);
+  const file = getImageFolder_().createFile(blob);
+  file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+  return 'https://lh3.googleusercontent.com/d/' + file.getId();
+}
+
+function trashImage_(url) {
+  const m = /\/d\/([A-Za-z0-9_-]+)/.exec(url || '');
+  if (!m) return;
+  try { DriveApp.getFileById(m[1]).setTrashed(true); } catch (err) { /* تجاهل */ }
+}
